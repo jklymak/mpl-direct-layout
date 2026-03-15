@@ -295,3 +295,56 @@ def test_outer_margins():
         example_plot(ax, fontsize=12)
     fig.get_layout_engine().set(left=0.3, right=0.3, top=0.3, bottom=0.3)
     return fig
+
+
+# ---------------------------------------------------------------------------
+# Colorbar overlap tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_colorbars_no_overlapV():
+    """Vertical colorbars on multiple axes should not overlap."""
+    fig = plt.figure(figsize=(2, 4), layout='direct')
+    axs = fig.subplots(2, 1, sharex=True, sharey=True)
+    for ax in axs:
+        ax.yaxis.set_major_formatter(ticker.NullFormatter())
+        ax.tick_params(axis='both', direction='in')
+        pcm = ax.pcolormesh([[1, 2], [3, 4]])
+        fig.colorbar(pcm, ax=ax, orientation='vertical')
+    fig.suptitle('Vertical colorbars')
+    return fig
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_colorbars_no_overlapH():
+    """Horizontal colorbars on multiple axes should not overlap."""
+    fig = plt.figure(figsize=(4, 2), layout='direct')
+    fig.suptitle('Horizontal colorbars')
+    axs = fig.subplots(1, 2, sharex=True, sharey=True)
+    for ax in axs:
+        ax.yaxis.set_major_formatter(ticker.NullFormatter())
+        ax.tick_params(axis='both', direction='in')
+        pcm = ax.pcolormesh([[1, 2], [3, 4]])
+        fig.colorbar(pcm, ax=ax, orientation='horizontal')
+    return fig
+
+
+def test_submerged_subfig():
+    """
+    Test that the layout logic does not get called multiple times
+    on same axes if it is already in a subfigure.
+    """
+    fig = plt.figure(figsize=(4, 5), layout='direct')
+    figures = fig.subfigures(3, 1)
+    axs = []
+    for f in figures.flatten():
+        gs = f.add_gridspec(2, 2)
+        for i in range(2):
+            axs += [f.add_subplot(gs[i, 0])]
+            axs[-1].plot([1, 2])
+        f.add_subplot(gs[:, 1]).plot([1, 2])
+    fig.canvas.draw()
+    # All left axes should have the same height
+    for ax in axs[1:]:
+        assert np.allclose(ax.get_position().bounds[-1],
+                           axs[0].get_position().bounds[-1], atol=1e-6)

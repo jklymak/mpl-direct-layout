@@ -435,8 +435,15 @@ class DirectLayoutEngine(LayoutEngine):
             parent_tight_bbox = fig.transSubfigure.inverted().transform_bbox(parent_tight)
 
         # Calculate space: distance from parent's tight edge to colorbar's tight edge
-        # plus a small buffer for neighboring axes
-        buffer = 0.05 / fig_w if location in ('right', 'left') else 0.05 / fig_h
+        # plus a buffer for neighboring axes
+        # Use larger buffer for vertical colorbars to prevent tick label overlap
+        if location in ('right', 'left'):
+            # For vertical colorbars, the tick labels extend horizontally
+            buffer = 0.05 / fig_w
+        else:
+            # For horizontal colorbars, the tick labels extend vertically
+            # Use a larger buffer to account for potential overlap between stacked colorbars
+            buffer = 0.15 / fig_h  # Increased from 0.05 to prevent overlap
 
         if location == 'right':
             space = cax_bbox.x1 - parent_tight_bbox.x1 + buffer
@@ -533,6 +540,7 @@ class DirectLayoutEngine(LayoutEngine):
         fig_w, fig_h = _fig_size_inches(fig)
         bar_in = 0.2; pad_in = 0.1
         positioned = set()
+        colorbar_positions = {}  # Track positioned colorbars by location
 
         for cax in fig.axes:
             if not hasattr(cax, '_colorbar_info') or id(cax) in positioned:
@@ -582,7 +590,7 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_right = max(tight_right, t.x1)
-                # Apply shrink to height (long dimension)
+                # Apply shrink to height (long dimension) based on parent spine extent
                 full_height = sy1 - sy0
                 cb_height = full_height * shrink
                 cy0 = sy0 + anchor[1] * (full_height - cb_height)
@@ -603,7 +611,7 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_left = min(tight_left, t.x0)
-                # Apply shrink to height (long dimension)
+                # Apply shrink to height (long dimension) based on parent spine extent
                 full_height = sy1 - sy0
                 cb_height = full_height * shrink
                 cy0 = sy0 + anchor[1] * (full_height - cb_height)
@@ -623,7 +631,7 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_top = max(tight_top, t.y1)
-                # Apply shrink to width (long dimension)
+                # Apply shrink to width (long dimension) based on parent spine extent
                 full_width = sx1 - sx0
                 cb_width = full_width * shrink
                 cx0 = sx0 + anchor[0] * (full_width - cb_width)
@@ -643,7 +651,7 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_bottom = min(tight_bottom, t.y0)
-                # Apply shrink to width (long dimension)
+                # Apply shrink to width (long dimension) based on parent spine extent
                 full_width = sx1 - sx0
                 cb_width = full_width * shrink
                 cx0 = sx0 + anchor[0] * (full_width - cb_width)
