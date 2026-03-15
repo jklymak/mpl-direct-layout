@@ -6,6 +6,7 @@ mpl-direct-layout
    :caption: Contents:
 
    usage
+   comparison
    api
 
 A kiwisolver-free layout engine for `Matplotlib <https://matplotlib.org>`_.

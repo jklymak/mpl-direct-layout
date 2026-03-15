@@ -565,12 +565,16 @@ class DirectLayoutEngine(LayoutEngine):
             pp = np.array(pp)
             sx0, sy0, sx1, sy1 = pp[:, 0].min(), pp[:, 1].min(), pp[:, 2].max(), pp[:, 3].max()
 
+            # Get shrink, anchor, and aspect parameters
+            shrink = cax._colorbar_info.get('shrink', 1.0)
+            anchor = cax._colorbar_info.get('anchor', (0.0, 0.5))
+            aspect = cax._colorbar_info.get('aspect', 20)  # aspect = long_dimension / short_dimension
+
             pad_fig_w = pad_in / fig_w
             pad_fig_h = pad_in / fig_h
-            cb_w = bar_in / fig_w
-            cb_h = bar_in / fig_h
 
             if location == 'right':
+                # For vertical colorbar: height is long dimension, width = height / aspect
                 # Start after the tight bbox right edge of all parents
                 tight_right = sx1
                 for pax in parents:
@@ -578,10 +582,20 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_right = max(tight_right, t.x1)
+                # Apply shrink to height (long dimension)
+                full_height = sy1 - sy0
+                cb_height = full_height * shrink
+                cy0 = sy0 + anchor[1] * (full_height - cb_height)
+                cy1 = cy0 + cb_height
+                # Compute width from aspect ratio: width = height / aspect
+                # Convert to inches: cb_height is in fig coords, convert to inches, divide by aspect, convert back
+                cb_height_inches = cb_height * fig_h
+                cb_width_inches = cb_height_inches / aspect
+                cb_w = cb_width_inches / fig_w
                 cx0 = tight_right + pad_fig_w
                 cx1 = cx0 + cb_w
-                cy0, cy1 = sy0, sy1
             elif location == 'left':
+                # For vertical colorbar: height is long dimension, width = height / aspect
                 # Start before the tight bbox left edge of all parents
                 tight_left = sx0
                 for pax in parents:
@@ -589,10 +603,19 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_left = min(tight_left, t.x0)
+                # Apply shrink to height (long dimension)
+                full_height = sy1 - sy0
+                cb_height = full_height * shrink
+                cy0 = sy0 + anchor[1] * (full_height - cb_height)
+                cy1 = cy0 + cb_height
+                # Compute width from aspect ratio
+                cb_height_inches = cb_height * fig_h
+                cb_width_inches = cb_height_inches / aspect
+                cb_w = cb_width_inches / fig_w
                 cx1 = tight_left - pad_fig_w
                 cx0 = cx1 - cb_w
-                cy0, cy1 = sy0, sy1
             elif location == 'top':
+                # For horizontal colorbar: width is long dimension, height = width / aspect
                 # Start above the tight bbox top edge of all parents
                 tight_top = sy1
                 for pax in parents:
@@ -600,10 +623,19 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_top = max(tight_top, t.y1)
+                # Apply shrink to width (long dimension)
+                full_width = sx1 - sx0
+                cb_width = full_width * shrink
+                cx0 = sx0 + anchor[0] * (full_width - cb_width)
+                cx1 = cx0 + cb_width
+                # Compute height from aspect ratio
+                cb_width_inches = cb_width * fig_w
+                cb_height_inches = cb_width_inches / aspect
+                cb_h = cb_height_inches / fig_h
                 cy0 = tight_top + pad_fig_h
                 cy1 = cy0 + cb_h
-                cx0, cx1 = sx0, sx1
             elif location == 'bottom':
+                # For horizontal colorbar: width is long dimension, height = width / aspect
                 # Start below the tight bbox bottom edge of all parents
                 tight_bottom = sy0
                 for pax in parents:
@@ -611,9 +643,17 @@ class DirectLayoutEngine(LayoutEngine):
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_bottom = min(tight_bottom, t.y0)
+                # Apply shrink to width (long dimension)
+                full_width = sx1 - sx0
+                cb_width = full_width * shrink
+                cx0 = sx0 + anchor[0] * (full_width - cb_width)
+                cx1 = cx0 + cb_width
+                # Compute height from aspect ratio
+                cb_width_inches = cb_width * fig_w
+                cb_height_inches = cb_width_inches / aspect
+                cb_h = cb_height_inches / fig_h
                 cy1 = tight_bottom - pad_fig_h
                 cy0 = cy1 - cb_h
-                cx0, cx1 = sx0, sx1
             else:
                 continue
 
