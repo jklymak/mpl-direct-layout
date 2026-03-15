@@ -7,6 +7,8 @@ A kiwisolver-free layout engine for [Matplotlib](https://matplotlib.org) that
 positions axes using direct algebraic solving rather than constraint
 optimisation.
 
+![Example: Mosaic layout with shared colorbar](tests/baseline_images/test_mosaic_shared_colorbar.png)
+
 ## Documentation
 
 Full documentation is available at **[jklymak.github.io/mpl-direct-layout](https://jklymak.github.io/mpl-direct-layout/)**
