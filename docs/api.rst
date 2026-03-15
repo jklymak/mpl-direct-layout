@@ -1,17 +1,15 @@
 API reference
 =============
 
-.. automodule:: mpl_direct_layout
-   :members:
-   :undoc-members:
+Layout Engine
+-------------
 
 .. autoclass:: mpl_direct_layout.DirectLayoutEngine
    :members:
    :inherited-members:
    :show-inheritance:
 
-Registration helpers
---------------------
+Registration
+------------
 
-.. autofunction:: mpl_direct_layout._register.register
-.. autofunction:: mpl_direct_layout._register.unregister
+.. autofunction:: mpl_direct_layout.register

@@ -25,6 +25,16 @@ intersphinx_mapping = {
 
 numpydoc_show_class_members = False
 
+# Plot directive configuration
+plot_include_source = True
+plot_html_show_source_link = False
+plot_formats = ['png']
+plot_html_show_formats = False
+
+# Suppress duplicate object warnings from plot directive imports
+suppress_warnings = ['app.add_node', 'app.add_directive', 'autosummary']
+autodoc_member_order = 'bysource'
+
 templates_path = ['_templates']
 exclude_patterns = ['_build', 'Thumbs.db', '.DS_Store']
 
