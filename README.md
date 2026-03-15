@@ -1,10 +1,15 @@
 # mpl-direct-layout
 
 [![Tests](https://github.com/jklymak/mpl-direct-layout/actions/workflows/tests.yml/badge.svg)](https://github.com/jklymak/mpl-direct-layout/actions/workflows/tests.yml)
+[![Documentation](https://github.com/jklymak/mpl-direct-layout/actions/workflows/deploy-docs.yml/badge.svg)](https://jklymak.github.io/mpl-direct-layout/)
 
 A kiwisolver-free layout engine for [Matplotlib](https://matplotlib.org) that
 positions axes using direct algebraic solving rather than constraint
 optimisation.
+
+## Documentation
+
+Full documentation is available at **[jklymak.github.io/mpl-direct-layout](https://jklymak.github.io/mpl-direct-layout/)**
 
 ## Why?
 
