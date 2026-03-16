@@ -183,8 +183,8 @@ Comparison with constrained_layout
 | ``hspace`` / ``wspace``    | ✓                | ✗ (use h_pad)      |
 +----------------------------+------------------+--------------------+
 
-Performance comparison
-----------------------
+Performance
+~~~~~~~~~~~
 
 .. figure:: ../benchmark_timing_memory.png
    :align: center
