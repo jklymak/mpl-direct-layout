@@ -1,12 +1,18 @@
 # Configuration file for the Sphinx documentation builder.
 
+
 import os
 import sys
+import tomllib
 sys.path.insert(0, os.path.abspath('../src'))
 
-project = 'mpl-direct-layout'
-author = 'Jody Klymak'
-release = '0.1.0'
+# Read project metadata from pyproject.toml
+with open(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'pyproject.toml')), 'rb') as f:
+    pyproject = tomllib.load(f)
+project = pyproject['project']['name']
+release = pyproject['project']['version']
+author = pyproject['project']['authors'][0]['name']
+copyright = f"2026, {author}"
 
 extensions = [
     'sphinx.ext.autodoc',
