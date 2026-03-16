@@ -161,3 +161,23 @@ Key Differences
 **Use Cases:**
   - ``direct`` is ideal when you want precise control over spacing in physical units
   - ``constrained`` may handle more complex edge cases and has years of production use
+
+Performance
+-----------
+
+.. figure:: ../benchmark_timing_memory.png
+   :align: center
+   :width: 80%
+   :alt: Timing and memory usage comparison between direct and constrained_layout
+
+   Timing and peak memory usage for DirectLayoutEngine vs constrained_layout on grids up to 30×30 axes.
+   (See benchmark_timing_memory.txt for system details.)
+
+The plot above was generated using the benchmark script in the repository. For reproducibility, system and environment details are saved in ``benchmark_timing_memory.txt``:
+
+.. literalinclude:: ../benchmark_timing_memory.txt
+   :language: none
+   :caption: System and environment details for the benchmark run
+
+.. note::
+   The benchmark is not run as part of the documentation build, to avoid long runtimes. The image and system info are static outputs from a single run.
