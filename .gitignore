@@ -54,3 +54,31 @@ venv.bak/
 
 # Distribution
 *.whl
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+
+# VS Code
+.vscode/
+
+# MacOS
+.DS_Store
+
+# Editor backups
+*~
+*.swp
+*.tmp
+
+# Benchmark outputs (keep only the main PNG/TXT)
+benchmark_timing_memory*.png
+benchmark_timing_memory*.txt
+!benchmark_timing_memory.png
+!benchmark_timing_memory.txt
+
+# Ignore large raw data files
+*.dat
+*.csv
