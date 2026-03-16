@@ -56,14 +56,17 @@ def analyze_and_plot(csv_path='benchmark_timing_data.csv'):
 
     # Plot timing trends (no fits)
     fig, ax1 = plt.subplots(figsize=(7, 5), layout='direct')
-    for i, n in enumerate(grid_sizes):
-        ax1.plot([n]*n_repeats, np.array(direct_all_times[i])*1000, 'o', color='gray', alpha=0.4)
-        ax1.plot([n]*n_repeats, np.array(constrained_all_times[i])*1000, 's', color='red', alpha=0.4)
-        ax1.plot([n]*n_repeats, np.array(nolayout_all_times[i])*1000, 'x', color='blue', alpha=0.3)
-    ax1.plot(grid_sizes, [np.mean(times)*1000 for times in nolayout_all_times], 'x--', label='No layout', color='blue')
-    ax1.plot(grid_sizes, [np.mean(times)*1000 for times in direct_all_times], 'o-', label='DirectLayoutEngine', color='black')
-    ax1.plot(grid_sizes, [np.mean(times)*1000 for times in constrained_all_times], 's-', label='constrained_layout', color='red')
-    ax1.set_ylabel('Draw time (ms)')
+    # Draw no-layout first, then direct (green), then constrained (red)
+    ax1.plot(grid_sizes, [np.mean(times) for times in nolayout_all_times], 'd-', label='No layout', color='grey')
+    ax1.plot(grid_sizes, [np.mean(times) for times in constrained_all_times], 's-', label='constrained_layout', color='red')
+    ax1.plot(grid_sizes, [np.mean(times) for times in direct_all_times], 'o-', label='DirectLayoutEngine', color='green')
+    #for i, n in enumerate(grid_sizes):
+    #    ax1.plot([n]*n_repeats, np.array(nolayout_all_times[i]), '.', color='grey', alpha=0.4, markersize=3)
+    #for i, n in enumerate(grid_sizes):
+    #    ax1.plot([n]*n_repeats, np.array(direct_all_times[i]), '.', color='green', alpha=0.4, markersize=3)
+    #for i, n in enumerate(grid_sizes):
+    #    ax1.plot([n]*n_repeats, np.array(constrained_all_times[i]), '.', color='red', alpha=0.4, markersize=3)
+    ax1.set_ylabel('Draw time (s)')
     ax1.set_xlabel('Grid size N (for N×N)')
     ax1.set_title('Timing vs Grid Size')
     ax1.legend()
