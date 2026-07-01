@@ -243,31 +243,53 @@ class DirectLayoutEngine(LayoutEngine):
 
             kw = dict(fig_width_inches=fig_width_inches,
                       fig_height_inches=fig_height_inches)
-            # Two passes – second pass converges after positions are known
-            for _ in range(2):
-                self._apply_layout_to_grid(
-                    fig, axes_grid, nrows, ncols, spanning_axes,
-                    width_ratios, height_ratios, is_subfigure, rect, **kw)
+            do_compress = (self._params.get('compress', False)
+                           and len(gridspec_to_axes) == 1)
 
-            # Compression pass: only when exactly one gridspec and compress=True
-            if self._params.get('compress', False) and len(gridspec_to_axes) == 1:
+            if not do_compress:
+                # Two passes – second pass converges after positions are known.
+                for _ in range(2):
+                    self._apply_layout_to_grid(
+                        fig, axes_grid, nrows, ncols, spanning_axes,
+                        width_ratios, height_ratios, is_subfigure, rect, **kw)
+            else:
+                # Compressed layout.  Matplotlib's ``do_constrained_layout``
+                # runs the full solver twice: ``apply_aspect`` shrinks
+                # fixed-aspect axes on the first iteration, so the second
+                # iteration measures decorations relative to the shrunk boxes
+                # (reserving tick-label space between tightly-packed axes) and
+                # re-converges the slack so the orthogonal direction is not
+                # over-compressed.  We mirror that structure: measure the
+                # decoration margins once per outer iteration -- from the
+                # positions left by the previous iteration -- and reuse them
+                # for both the normal and the compressed placement.
+                renderer = fig._get_renderer()
                 fw = fig_width_inches
                 fh = fig_height_inches
                 if fw is None or fh is None:
                     fw, fh = _fig_size_inches(fig)
-                extra = self._compute_compression(
-                    fig, axes_grid, nrows, ncols, spanning_axes, fw, fh)
-                if extra is not None:
+                for _outer in range(2):
+                    cached = self._measure_grid_margins(
+                        fig, renderer, axes_grid, nrows, ncols, spanning_axes)
                     self._apply_layout_to_grid(
                         fig, axes_grid, nrows, ncols, spanning_axes,
                         width_ratios, height_ratios, is_subfigure, rect,
-                        compress_extra=extra, **kw)
+                        cached_margins=cached, **kw)
+                    extra = self._compute_compression(
+                        fig, axes_grid, nrows, ncols, spanning_axes, fw, fh)
+                    if extra is None:
+                        break
+                    self._apply_layout_to_grid(
+                        fig, axes_grid, nrows, ncols, spanning_axes,
+                        width_ratios, height_ratios, is_subfigure, rect,
+                        compress_extra=extra, cached_margins=cached, **kw)
 
     def _apply_layout_to_grid(self, fig, axes_grid, nrows, ncols,
                                spanning_axes=None, width_ratios=None,
                                height_ratios=None, is_subfigure=False,
                                subfig_rect=None, fig_width_inches=None,
-                               fig_height_inches=None, compress_extra=None):
+                               fig_height_inches=None, compress_extra=None,
+                               cached_margins=None):
         """Core algebraic positioning for one gridspec.
 
         Parameters
@@ -276,6 +298,22 @@ class DirectLayoutEngine(LayoutEngine):
             Extra outer margins ``(left, right, top, bottom)`` in
             figure-relative coordinates added on top of the normal outer
             margins.  Used by the compression pass.
+        cached_margins : tuple of 4 ndarrays or None
+            Pre-computed aggregated decoration margins
+            ``(left_margins, right_margins, bottom_margins, top_margins)``
+            (per-column for L/R, per-row for B/T) to use instead of
+            re-measuring.  The compression pass passes the margins measured
+            during the normal pass so that decoration space is not re-derived
+            from the shrunk (post-``apply_aspect``) axes.  This mirrors
+            matplotlib's ``compress_fixed_aspect``, which only edits the outer
+            figure margins and leaves the per-axis inner margins untouched.
+
+        Returns
+        -------
+        tuple of 4 ndarrays
+            The aggregated decoration margins
+            ``(left_margins, right_margins, bottom_margins, top_margins)``
+            actually used for placement, so callers can cache and reuse them.
         """
         if spanning_axes is None:
             spanning_axes = []
@@ -308,6 +346,76 @@ class DirectLayoutEngine(LayoutEngine):
 
         rect = self._adjust_rect_for_suptitles(fig, renderer, rect)
 
+        if cached_margins is not None:
+            # Compression pass: reuse the decoration margins measured during
+            # the normal pass rather than re-deriving them from the shrunk
+            # (post-apply_aspect) axes.  Only the outer margins change here.
+            left_margins, right_margins, bottom_margins, top_margins = \
+                cached_margins
+        else:
+            left_margins, right_margins, bottom_margins, top_margins = \
+                self._measure_grid_margins(fig, renderer, axes_grid,
+                                           nrows, ncols, spanning_axes)
+
+        fig_left, fig_bottom, fig_width, fig_height = rect
+        fig_right = fig_left + fig_width
+        fig_top   = fig_bottom + fig_height
+
+        margins_used = (left_margins, right_margins, bottom_margins, top_margins)
+
+        available_width  = fig_width  - left_margins.sum() - right_margins.sum()  - w_pad * (ncols - 1)
+        available_height = fig_height - bottom_margins.sum() - top_margins.sum() - h_pad * (nrows - 1)
+
+        if available_width <= 0 or available_height <= 0:
+            return margins_used
+
+        width_ratios  = np.array(width_ratios)  if width_ratios  is not None else np.ones(ncols)
+        height_ratios = np.array(height_ratios) if height_ratios is not None else np.ones(nrows)
+        col_widths  = (width_ratios  / width_ratios.sum())  * available_width
+        row_heights = (height_ratios / height_ratios.sum()) * available_height
+
+        # --- Compute and apply positions ---
+        positions = np.zeros((nrows, ncols, 4))
+
+        for j in range(ncols):
+            col_left = (fig_left + left_margins[0] if j == 0
+                        else positions[0, j-1, 2] + right_margins[j-1] + w_pad + left_margins[j])
+            col_right = col_left + col_widths[j]
+
+            for i in range(nrows):
+                row_top = (fig_top - top_margins[0] if i == 0
+                           else positions[i-1, j, 1] - bottom_margins[i-1] - h_pad - top_margins[i])
+                row_bottom = row_top - row_heights[i]
+                positions[i, j] = [col_left, row_bottom, col_right, row_top]
+                ax = axes_grid[i, j]
+                if ax is not None and ax.get_visible():
+                    ax.set_position([col_left, row_bottom,
+                                     col_right - col_left, row_top - row_bottom])
+
+        for ax in spanning_axes:
+            if not ax.get_visible():
+                continue
+            ss = ax.get_subplotspec()
+            rs, re = ss.rowspan.start, ss.rowspan.stop
+            cs, ce = ss.colspan.start, ss.colspan.stop
+            ax.set_position([
+                positions[rs, cs, 0],
+                positions[re - 1, cs, 1],
+                positions[rs, ce - 1, 2] - positions[rs, cs, 0],
+                positions[rs, cs, 3]     - positions[re - 1, cs, 1],
+            ])
+
+        self._position_colorbars(fig, axes_grid, positions, nrows, ncols, spanning_axes)
+
+        return margins_used
+
+    def _measure_grid_margins(self, fig, renderer, axes_grid, nrows, ncols,
+                              spanning_axes):
+        """Measure decoration (and colorbar) margins for the whole grid.
+
+        Returns aggregated per-column ``(left, right)`` and per-row
+        ``(bottom, top)`` margin arrays in figure-relative coordinates.
+        """
         # --- Margin array [row, col, side]: L=0 R=1 B=2 T=3 ---
         margins = np.zeros((nrows, ncols, 4))
 
@@ -370,54 +478,7 @@ class DirectLayoutEngine(LayoutEngine):
         top_margins    = np.array([margins[i, :, 3].max()
                                     if np.any(margins[i, :, :]) else 0
                                     for i in range(nrows)])
-
-        fig_left, fig_bottom, fig_width, fig_height = rect
-        fig_right = fig_left + fig_width
-        fig_top   = fig_bottom + fig_height
-
-        available_width  = fig_width  - left_margins.sum() - right_margins.sum()  - w_pad * (ncols - 1)
-        available_height = fig_height - bottom_margins.sum() - top_margins.sum() - h_pad * (nrows - 1)
-
-        if available_width <= 0 or available_height <= 0:
-            return
-
-        width_ratios  = np.array(width_ratios)  if width_ratios  is not None else np.ones(ncols)
-        height_ratios = np.array(height_ratios) if height_ratios is not None else np.ones(nrows)
-        col_widths  = (width_ratios  / width_ratios.sum())  * available_width
-        row_heights = (height_ratios / height_ratios.sum()) * available_height
-
-        # --- Compute and apply positions ---
-        positions = np.zeros((nrows, ncols, 4))
-
-        for j in range(ncols):
-            col_left = (fig_left + left_margins[0] if j == 0
-                        else positions[0, j-1, 2] + right_margins[j-1] + w_pad + left_margins[j])
-            col_right = col_left + col_widths[j]
-
-            for i in range(nrows):
-                row_top = (fig_top - top_margins[0] if i == 0
-                           else positions[i-1, j, 1] - bottom_margins[i-1] - h_pad - top_margins[i])
-                row_bottom = row_top - row_heights[i]
-                positions[i, j] = [col_left, row_bottom, col_right, row_top]
-                ax = axes_grid[i, j]
-                if ax is not None and ax.get_visible():
-                    ax.set_position([col_left, row_bottom,
-                                     col_right - col_left, row_top - row_bottom])
-
-        for ax in spanning_axes:
-            if not ax.get_visible():
-                continue
-            ss = ax.get_subplotspec()
-            rs, re = ss.rowspan.start, ss.rowspan.stop
-            cs, ce = ss.colspan.start, ss.colspan.stop
-            ax.set_position([
-                positions[rs, cs, 0],
-                positions[re - 1, cs, 1],
-                positions[rs, ce - 1, 2] - positions[rs, cs, 0],
-                positions[rs, cs, 3]     - positions[re - 1, cs, 1],
-            ])
-
-        self._position_colorbars(fig, axes_grid, positions, nrows, ncols, spanning_axes)
+        return left_margins, right_margins, bottom_margins, top_margins
 
     # ------------------------------------------------------------------
     # Compression helpers
@@ -456,8 +517,8 @@ class DirectLayoutEngine(LayoutEngine):
                 ax = axes_grid[i, j]
                 if ax is None or not ax.get_visible():
                     continue
+                orig = ax.get_position(original=True)
                 ax.apply_aspect()
-                orig   = ax.get_position(original=True)
                 actual = ax.get_position(original=False)
                 dw = orig.width  - actual.width
                 dh = orig.height - actual.height
@@ -472,8 +533,8 @@ class DirectLayoutEngine(LayoutEngine):
         for ax in (spanning_axes or []):
             if not ax.get_visible():
                 continue
+            orig = ax.get_position(original=True)
             ax.apply_aspect()
-            orig   = ax.get_position(original=True)
             actual = ax.get_position(original=False)
             dw = orig.width  - actual.width
             dh = orig.height - actual.height
