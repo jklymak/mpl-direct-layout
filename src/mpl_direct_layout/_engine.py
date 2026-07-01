@@ -263,6 +263,11 @@ class DirectLayoutEngine(LayoutEngine):
                 # decoration margins once per outer iteration -- from the
                 # positions left by the previous iteration -- and reuse them
                 # for both the normal and the compressed placement.
+                #
+                # Both iterations always run, even when nothing compresses:
+                # auto tick locators add/remove ticks as the axes change size,
+                # so the second pass brings the decorations close to their
+                # final size (matching the plain two-pass path above).
                 renderer = fig._get_renderer()
                 fw = fig_width_inches
                 fh = fig_height_inches
@@ -277,12 +282,11 @@ class DirectLayoutEngine(LayoutEngine):
                         cached_margins=cached, **kw)
                     extra = self._compute_compression(
                         fig, axes_grid, nrows, ncols, spanning_axes, fw, fh)
-                    if extra is None:
-                        break
-                    self._apply_layout_to_grid(
-                        fig, axes_grid, nrows, ncols, spanning_axes,
-                        width_ratios, height_ratios, is_subfigure, rect,
-                        compress_extra=extra, cached_margins=cached, **kw)
+                    if extra is not None:
+                        self._apply_layout_to_grid(
+                            fig, axes_grid, nrows, ncols, spanning_axes,
+                            width_ratios, height_ratios, is_subfigure, rect,
+                            compress_extra=extra, cached_margins=cached, **kw)
 
     def _apply_layout_to_grid(self, fig, axes_grid, nrows, ncols,
                                spanning_axes=None, width_ratios=None,
