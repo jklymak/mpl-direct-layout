@@ -66,7 +66,7 @@ class DirectLayoutEngine(LayoutEngine):
 
     def __init__(self, *, h_pad=None, w_pad=None, rect=(0, 0, 1, 1),
                  left=None, right=None, top=None, bottom=None,
-                 suptitle_pad=None, **kwargs):
+                 suptitle_pad=None, compress=False, **kwargs):
         super().__init__(**kwargs)
         default_pad = 0.1  # inches between axes
         default_margin = 0.1  # inches at figure edges
@@ -77,11 +77,12 @@ class DirectLayoutEngine(LayoutEngine):
                  right=right if right is not None else default_margin,
                  top=top if top is not None else default_margin,
                  bottom=bottom if bottom is not None else default_margin,
-                 suptitle_pad=suptitle_pad if suptitle_pad is not None else 0.1)
+                 suptitle_pad=suptitle_pad if suptitle_pad is not None else 0.1,
+                 compress=compress)
 
     def set(self, *, h_pad=None, w_pad=None, rect=None,
             left=None, right=None, top=None, bottom=None,
-            suptitle_pad=None):
+            suptitle_pad=None, compress=None):
         """
         Set layout parameters.
 
@@ -95,6 +96,9 @@ class DirectLayoutEngine(LayoutEngine):
             Outer margins in inches from figure edges.
         suptitle_pad : float
             Gap in inches between suptitle/supxlabel/supylabel and axes.
+        compress : bool
+            If True, compress whitespace left by fixed-aspect axes into the
+            outer margins, centering the grid.  Default False.
         """
         if h_pad is not None:
             self._params['h_pad'] = h_pad
@@ -112,6 +116,8 @@ class DirectLayoutEngine(LayoutEngine):
             self._params['bottom'] = bottom
         if suptitle_pad is not None:
             self._params['suptitle_pad'] = suptitle_pad
+        if compress is not None:
+            self._params['compress'] = compress
 
     def execute(self, fig):
         """
@@ -243,12 +249,34 @@ class DirectLayoutEngine(LayoutEngine):
                     fig, axes_grid, nrows, ncols, spanning_axes,
                     width_ratios, height_ratios, is_subfigure, rect, **kw)
 
+            # Compression pass: only when exactly one gridspec and compress=True
+            if self._params.get('compress', False) and len(gridspec_to_axes) == 1:
+                fw = fig_width_inches
+                fh = fig_height_inches
+                if fw is None or fh is None:
+                    fw, fh = _fig_size_inches(fig)
+                extra = self._compute_compression(
+                    fig, axes_grid, nrows, ncols, spanning_axes, fw, fh)
+                if extra is not None:
+                    self._apply_layout_to_grid(
+                        fig, axes_grid, nrows, ncols, spanning_axes,
+                        width_ratios, height_ratios, is_subfigure, rect,
+                        compress_extra=extra, **kw)
+
     def _apply_layout_to_grid(self, fig, axes_grid, nrows, ncols,
                                spanning_axes=None, width_ratios=None,
                                height_ratios=None, is_subfigure=False,
                                subfig_rect=None, fig_width_inches=None,
-                               fig_height_inches=None):
-        """Core algebraic positioning for one gridspec."""
+                               fig_height_inches=None, compress_extra=None):
+        """Core algebraic positioning for one gridspec.
+
+        Parameters
+        ----------
+        compress_extra : tuple of 4 floats or None
+            Extra outer margins ``(left, right, top, bottom)`` in
+            figure-relative coordinates added on top of the normal outer
+            margins.  Used by the compression pass.
+        """
         if spanning_axes is None:
             spanning_axes = []
 
@@ -267,6 +295,12 @@ class DirectLayoutEngine(LayoutEngine):
         rm = self._params['right'] / fig_width_inches
         tm = self._params['top']   / fig_height_inches
         bm = self._params['bottom']/ fig_height_inches
+        if compress_extra is not None:
+            extra_lm, extra_rm, extra_tm, extra_bm = compress_extra
+            lm += extra_lm
+            rm += extra_rm
+            tm += extra_tm
+            bm += extra_bm
         rect[0] += lm
         rect[1] += bm
         rect[2] -= lm + rm
@@ -384,6 +418,80 @@ class DirectLayoutEngine(LayoutEngine):
             ])
 
         self._position_colorbars(fig, axes_grid, positions, nrows, ncols, spanning_axes)
+
+    # ------------------------------------------------------------------
+    # Compression helpers
+    # ------------------------------------------------------------------
+
+    def _compute_compression(self, fig, axes_grid, nrows, ncols,
+                              spanning_axes, fig_width_inches, fig_height_inches):
+        """Compute extra outer margins that absorb fixed-aspect whitespace.
+
+        After the normal layout pass, fixed-aspect axes (e.g. imshow) are
+        shrunk by :meth:`apply_aspect` at draw time, leaving whitespace inside
+        their allocated grid cells.  This method measures that slack and
+        returns the extra margin (in figure-relative coords) that should be
+        added to each pair of outer edges to centre the grid.
+
+        Parameters
+        ----------
+        fig : Figure or SubFigure
+        axes_grid : ndarray, shape (nrows, ncols)
+        nrows, ncols : int
+        spanning_axes : list of Axes
+        fig_width_inches, fig_height_inches : float
+
+        Returns
+        -------
+        tuple ``(extra_lm, extra_rm, extra_tm, extra_bm)`` in figure-relative
+        coordinates, or *None* if no axes have a fixed aspect ratio.
+        """
+        extraw = np.zeros(ncols)   # per-column slack (fig-relative)
+        extrah = np.zeros(nrows)   # per-row slack (fig-relative)
+        has_fixed_aspect = False
+
+        # Regular-grid axes
+        for i in range(nrows):
+            for j in range(ncols):
+                ax = axes_grid[i, j]
+                if ax is None or not ax.get_visible():
+                    continue
+                ax.apply_aspect()
+                orig   = ax.get_position(original=True)
+                actual = ax.get_position(original=False)
+                dw = orig.width  - actual.width
+                dh = orig.height - actual.height
+                if dw > 1e-10:
+                    has_fixed_aspect = True
+                    extraw[j] = max(extraw[j], dw)
+                if dh > 1e-10:
+                    has_fixed_aspect = True
+                    extrah[i] = max(extrah[i], dh)
+
+        # Spanning axes
+        for ax in (spanning_axes or []):
+            if not ax.get_visible():
+                continue
+            ax.apply_aspect()
+            orig   = ax.get_position(original=True)
+            actual = ax.get_position(original=False)
+            dw = orig.width  - actual.width
+            dh = orig.height - actual.height
+            ss = ax.get_subplotspec()
+            if dw > 1e-10:
+                has_fixed_aspect = True
+                extraw[ss.colspan] = np.maximum(extraw[ss.colspan], dw)
+            if dh > 1e-10:
+                has_fixed_aspect = True
+                extrah[ss.rowspan] = np.maximum(extrah[ss.rowspan], dh)
+
+        if not has_fixed_aspect:
+            return None
+
+        # Half the total slack goes to each outer edge pair
+        extra_w = extraw.sum() / 2   # figure-relative units
+        extra_h = extrah.sum() / 2
+        return extra_w, extra_w, extra_h, extra_h   # left, right, top, bottom
 
     # ------------------------------------------------------------------
     # Decoration measurement helpers

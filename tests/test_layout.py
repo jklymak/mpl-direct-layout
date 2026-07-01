@@ -348,3 +348,107 @@ def test_submerged_subfig():
     for ax in axs[1:]:
         assert np.allclose(ax.get_position().bounds[-1],
                            axs[0].get_position().bounds[-1], atol=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Compressed layout tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_2x2_imshow():
+    """Canonical compressed layout: 2x2 grid of square images on a wide figure.
+
+    With compress=True the axes should be pulled together with minimal lateral
+    whitespace; the slack from the fixed-aspect shrinkage goes into the outer
+    margins, centring the grid.
+    """
+    rng = np.random.default_rng(0)
+    fig, axs = plt.subplots(2, 2, layout='direct-compressed', figsize=(10, 4))
+    for ax in axs.flat:
+        ax.imshow(rng.standard_normal((10, 10)))
+    return fig
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_no_aspect_noop():
+    """compress=True on axes without a fixed aspect must be a no-op visually.
+
+    The result should be indistinguishable from compress=False.
+    """
+    fig, axs = plt.subplots(2, 2, layout='direct-compressed', figsize=(8, 6))
+    for ax in axs.flat:
+        example_plot(ax, fontsize=12)
+    return fig
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_with_colorbar():
+    """Compressed layout with a shared colorbar.
+
+    The colorbar should reposition correctly after the compression pass.
+    """
+    rng = np.random.default_rng(1)
+    fig, axs = plt.subplots(2, 2, layout='direct-compressed', figsize=(10, 5))
+    for ax in axs.flat:
+        im = ax.imshow(rng.standard_normal((10, 10)), vmin=-2, vmax=2)
+    fig.colorbar(im, ax=axs, shrink=0.6)
+    return fig
+
+
+def test_compressed_idempotency():
+    """Drawing a compressed figure twice must not move the axes.
+
+    After the first draw the slack should be essentially zero, so the
+    second draw should produce positions that are identical (within floating-
+    point tolerance) to the first.
+    """
+    rng = np.random.default_rng(2)
+    fig, axs = plt.subplots(2, 2, layout='direct-compressed', figsize=(10, 4))
+    for ax in axs.flat:
+        ax.imshow(rng.standard_normal((10, 10)))
+
+    # First draw
+    fig.canvas.draw()
+    positions_first = [ax.get_position().bounds for ax in axs.flat]
+
+    # Second draw
+    fig.canvas.draw()
+    positions_second = [ax.get_position().bounds for ax in axs.flat]
+
+    for p1, p2 in zip(positions_first, positions_second):
+        assert np.allclose(p1, p2, atol=1e-4), (
+            f"Positions changed between draws: {p1} vs {p2}")
+
+
+def test_compressed_layout_reduces_whitespace():
+    """Compressed layout must produce less lateral whitespace than uncompressed.
+
+    On a wide figure with square images the total width occupied by the axes
+    group should be smaller (i.e. the left edge is further right) when
+    compress=False, because compression moves the slack into the outer margins.
+    """
+    rng = np.random.default_rng(3)
+
+    fig_nc, axs_nc = plt.subplots(2, 2, layout='direct', figsize=(10, 4))
+    for ax in axs_nc.flat:
+        ax.imshow(rng.standard_normal((10, 10)))
+    fig_nc.canvas.draw()
+    x0_nc = min(ax.get_position().x0 for ax in axs_nc.flat)
+    x1_nc = max(ax.get_position().x1 for ax in axs_nc.flat)
+    plt.close(fig_nc)
+
+    fig_c, axs_c = plt.subplots(2, 2, layout='direct-compressed', figsize=(10, 4))
+    for ax in axs_c.flat:
+        ax.imshow(rng.standard_normal((10, 10)))
+    fig_c.canvas.draw()
+    x0_c = min(ax.get_position().x0 for ax in axs_c.flat)
+    x1_c = max(ax.get_position().x1 for ax in axs_c.flat)
+    plt.close(fig_c)
+
+    # The compressed grid should be narrower (less total span) than uncompressed
+    span_nc = x1_nc - x0_nc
+    span_c  = x1_c  - x0_c
+    assert span_c < span_nc, (
+        f"Compressed span ({span_c:.4f}) should be less than "
+        f"uncompressed span ({span_nc:.4f})"
+    )
