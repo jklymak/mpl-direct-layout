@@ -452,3 +452,133 @@ def test_compressed_layout_reduces_whitespace():
         f"Compressed span ({span_c:.4f}) should be less than "
         f"uncompressed span ({span_nc:.4f})"
     )
+
+
+# ---------------------------------------------------------------------------
+# Mixed-aspect compressed layout tests
+#
+# Each test has a 2×2 grid on a wide figure (10×4 in) with compress=True.
+# Axes labelled by (row, col): 00 01 / 10 11.
+# 'equal' axes use imshow (square image → fixed aspect).
+# 'auto'  axes use a simple line plot.
+# ---------------------------------------------------------------------------
+
+def _make_mixed_aspect_fig(aspects):
+    """Return a compressed 2×2 figure with per-axis aspects.
+
+    Parameters
+    ----------
+    aspects : sequence of 4 str, row-major order (00, 01, 10, 11)
+        Each element is ``'equal'`` or ``'auto'``.
+    """
+    rng = np.random.default_rng(42)
+    fig, axs = plt.subplots(2, 2, layout='direct-compressed', figsize=(10, 4))
+    for ax, asp in zip(axs.flat, aspects):
+        if asp == 'equal':
+            ax.imshow(rng.standard_normal((10, 10)))
+        else:
+            example_plot(ax, fontsize=10, nodec=True)
+    return fig
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_all_equal():
+    """All four axes have equal aspect — full compression on both axes."""
+    return _make_mixed_aspect_fig(['equal', 'equal', 'equal', 'equal'])
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_all_auto():
+    """All four axes are auto — compression is a no-op."""
+    return _make_mixed_aspect_fig(['auto', 'auto', 'auto', 'auto'])
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_top_equal():
+    """Top row equal, bottom row auto."""
+    return _make_mixed_aspect_fig(['equal', 'equal', 'auto', 'auto'])
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_left_equal():
+    """Left column equal, right column auto."""
+    return _make_mixed_aspect_fig(['equal', 'auto', 'equal', 'auto'])
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_diagonal_equal():
+    """Diagonal axes equal (top-left, bottom-right), off-diagonal auto."""
+    return _make_mixed_aspect_fig(['equal', 'auto', 'auto', 'equal'])
+
+
+@pytest.mark.mpl_image_compare(style='mpl20', tolerance=5)
+def test_compressed_mixed_one_equal():
+    """Only top-left axis has equal aspect, the other three are auto."""
+    return _make_mixed_aspect_fig(['equal', 'auto', 'auto', 'auto'])
+
+
+# Numeric checks for the mixed-aspect cases ---------------------------------
+
+@pytest.mark.parametrize('figsize,aspects,expect_w_compress,expect_h_compress', [
+    # Wide figure (10×4): cells are wider than tall, so square images lose
+    # width but not height — only horizontal compression.
+    ((10, 4), ['equal', 'equal', 'equal', 'equal'], True,  False),
+    ((10, 4), ['auto',  'auto',  'auto',  'auto'],  False, False),
+    ((10, 4), ['equal', 'equal', 'auto',  'auto'],  True,  False),
+    ((10, 4), ['equal', 'auto',  'equal', 'auto'],  True,  False),
+    ((10, 4), ['equal', 'auto',  'auto',  'auto'],  True,  False),
+    # Tall figure (4×10): cells are taller than wide, so square images lose
+    # height but not width — only vertical compression.
+    ((4, 10), ['equal', 'equal', 'equal', 'equal'], False, True),
+    ((4, 10), ['auto',  'auto',  'auto',  'auto'],  False, False),
+    ((4, 10), ['auto',  'auto',  'equal', 'equal'], False, True),
+    ((4, 10), ['equal', 'auto',  'equal', 'auto'],  False, True),
+    ((4, 10), ['auto',  'auto',  'auto',  'equal'],  False, True),
+])
+def test_compressed_mixed_aspect_directions(figsize, aspects,
+                                            expect_w_compress, expect_h_compress):
+    """Check which directions are compressed for each aspect/figsize combination.
+
+    On a wide figure (cells wider than tall) square images shed width only.
+    On a tall figure (cells taller than wide) they shed height only.
+    Compression should shift x0 (horizontal) or y0 (vertical) relative to the
+    uncompressed baseline accordingly.
+    """
+    def _make(layout):
+        rng = np.random.default_rng(42)
+        fig, axs = plt.subplots(2, 2, layout=layout, figsize=figsize)
+        for ax, asp in zip(axs.flat, aspects):
+            if asp == 'equal':
+                ax.imshow(rng.standard_normal((10, 10)))
+            else:
+                ax.plot([1, 2])
+        fig.canvas.draw()
+        return fig, axs
+
+    fig_nc, axs_nc = _make('direct')
+    x0_nc = min(ax.get_position().x0 for ax in axs_nc.flat)
+    y0_nc = min(ax.get_position().y0 for ax in axs_nc.flat)
+    plt.close(fig_nc)
+
+    fig_c, axs_c = _make('direct-compressed')
+    x0_c = min(ax.get_position().x0 for ax in axs_c.flat)
+    y0_c = min(ax.get_position().y0 for ax in axs_c.flat)
+    plt.close(fig_c)
+
+    if expect_w_compress:
+        assert x0_c > x0_nc + 1e-4, (
+            f"Expected horizontal compression for figsize={figsize} aspects={aspects}: "
+            f"x0_compressed={x0_c:.4f} should be > x0_uncompressed={x0_nc:.4f}")
+    else:
+        assert abs(x0_c - x0_nc) < 1e-4, (
+            f"Expected no horizontal compression for figsize={figsize} aspects={aspects}: "
+            f"x0_compressed={x0_c:.4f} vs x0_uncompressed={x0_nc:.4f}")
+
+    if expect_h_compress:
+        assert y0_c > y0_nc + 1e-4, (
+            f"Expected vertical compression for figsize={figsize} aspects={aspects}: "
+            f"y0_compressed={y0_c:.4f} should be > y0_uncompressed={y0_nc:.4f}")
+    else:
+        assert abs(y0_c - y0_nc) < 1e-4, (
+            f"Expected no vertical compression for figsize={figsize} aspects={aspects}: "
+            f"y0_compressed={y0_c:.4f} vs y0_uncompressed={y0_nc:.4f}")
