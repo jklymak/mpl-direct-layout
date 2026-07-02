@@ -11,6 +11,9 @@ def _patched_set_layout_engine(self, layout=None, **kwargs):
     if layout == 'direct':
         self._layout_engine = DirectLayoutEngine(**kwargs)
         return
+    if layout == 'direct-compressed':
+        self._layout_engine = DirectLayoutEngine(compress=True, **kwargs)
+        return
     return _original_set_layout_engine(self, layout, **kwargs)
 
 

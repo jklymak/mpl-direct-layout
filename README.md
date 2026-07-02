@@ -19,6 +19,42 @@ Matplotlib's `constrained_layout` requires `kiwisolver`.  `mpl-direct-layout`
 achieves the same goal — tight, non-overlapping axes with proper label spacing
 — using only NumPy arithmetic, making it lighter and faster for simple grids.
 
+## Performance
+
+Both engines spend most of their time in the same place: measuring each axes'
+decorations (ticks, labels, titles) via Matplotlib's `get_tightbbox`.  The
+difference is in placement — `constrained_layout` runs a `kiwisolver`
+constraint solve whose cost grows super-linearly with the number of axes, while
+`DirectLayoutEngine` places axes with `O(n)` algebra.  As a result the direct
+engine pulls further ahead as grids get larger.
+
+![Layout time and speedup vs grid size](benchmarks/scaling_comparison.png)
+
+Layout-only timings (Matplotlib 3.11, Apple Silicon), sweeping `N×N` grids:
+
+| axes | plain: direct | plain: constrained | speedup | colorbar: direct | colorbar: constrained | speedup |
+|-----:|--------------:|-------------------:|--------:|-----------------:|----------------------:|--------:|
+|    4 |      12.6 ms  |            13.1 ms | 1.04×   |         31.0 ms  |              26.5 ms  | 0.85×   |
+|   64 |     201.2 ms  |           228.6 ms | 1.14×   |        517.2 ms  |             460.8 ms  | 0.89×   |
+|  144 |     454.6 ms  |           591.5 ms | 1.30×   |       1164.2 ms  |            1109.2 ms  | 0.95×   |
+|  400 |    1312.5 ms  |          2399.3 ms | 1.83×   |       3370.6 ms  |            3918.6 ms  | 1.16×   |
+
+For plain grids the direct engine is faster everywhere and the margin widens
+with size (1.8× at 400 axes).  With a colorbar on every axes there is a small
+constant per-colorbar overhead (measuring each colorbar's neighbour at its final
+size), so the direct engine trails on small grids; because that overhead is a
+constant factor while the constraint solve is super-linear, the direct engine
+crosses ahead at roughly 200 axes and leads at scale.  The regime where it
+trails — small colorbar grids — is already sub-30 ms, where the difference is
+imperceptible.
+
+Reproduce with:
+
+```bash
+python benchmarks/benchmark_scaling.py     # scaling sweep + comparison plot
+python benchmarks/benchmark_layout.py      # complex single-figure scenarios
+```
+
 ## Features
 
 - Drop-in replacement: use `layout='direct'` wherever you would use

@@ -82,3 +82,7 @@ benchmark_timing_memory*.txt
 # Ignore large raw data files
 *.dat
 *.csv
+# pixi environments
+.pixi/*
+!.pixi/config.toml
+pixi.lock

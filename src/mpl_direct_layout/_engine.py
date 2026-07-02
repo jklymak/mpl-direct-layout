@@ -7,9 +7,7 @@ of constraint solving to position axes on a grid.
 
 import numpy as np
 from matplotlib.layout_engine import LayoutEngine
-from matplotlib.transforms import Bbox
 from matplotlib import artist as martist
-import matplotlib as mpl
 
 
 def _fig_size_inches(fig):
@@ -66,8 +64,14 @@ class DirectLayoutEngine(LayoutEngine):
 
     def __init__(self, *, h_pad=None, w_pad=None, rect=(0, 0, 1, 1),
                  left=None, right=None, top=None, bottom=None,
-                 suptitle_pad=None, **kwargs):
+                 suptitle_pad=None, compress=False, **kwargs):
         super().__init__(**kwargs)
+        # Per-pass memo of tight bboxes (see ``_tightbbox``) and of the grid
+        # position of each axes (see ``_measure_grid_margins``).  Both are
+        # scratch state that is rebuilt and torn down within a single phase;
+        # they must never persist across a ``set_position`` call.
+        self._bbox_cache = None
+        self._grid_pos = None
         default_pad = 0.1  # inches between axes
         default_margin = 0.1  # inches at figure edges
         self.set(h_pad=h_pad if h_pad is not None else default_pad,
@@ -77,11 +81,12 @@ class DirectLayoutEngine(LayoutEngine):
                  right=right if right is not None else default_margin,
                  top=top if top is not None else default_margin,
                  bottom=bottom if bottom is not None else default_margin,
-                 suptitle_pad=suptitle_pad if suptitle_pad is not None else 0.1)
+                 suptitle_pad=suptitle_pad if suptitle_pad is not None else 0.1,
+                 compress=compress)
 
     def set(self, *, h_pad=None, w_pad=None, rect=None,
             left=None, right=None, top=None, bottom=None,
-            suptitle_pad=None):
+            suptitle_pad=None, compress=None):
         """
         Set layout parameters.
 
@@ -95,6 +100,9 @@ class DirectLayoutEngine(LayoutEngine):
             Outer margins in inches from figure edges.
         suptitle_pad : float
             Gap in inches between suptitle/supxlabel/supylabel and axes.
+        compress : bool
+            If True, compress whitespace left by fixed-aspect axes into the
+            outer margins, centering the grid.  Default False.
         """
         if h_pad is not None:
             self._params['h_pad'] = h_pad
@@ -112,13 +120,13 @@ class DirectLayoutEngine(LayoutEngine):
             self._params['bottom'] = bottom
         if suptitle_pad is not None:
             self._params['suptitle_pad'] = suptitle_pad
+        if compress is not None:
+            self._params['compress'] = compress
 
     def execute(self, fig):
         """
         Perform layout on *fig*.  Called automatically during the draw cycle.
         """
-        from matplotlib.figure import SubFigure
-
         subfigs = fig.subfigs if hasattr(fig, 'subfigs') and fig.subfigs else []
 
         if subfigs:
@@ -237,18 +245,82 @@ class DirectLayoutEngine(LayoutEngine):
 
             kw = dict(fig_width_inches=fig_width_inches,
                       fig_height_inches=fig_height_inches)
-            # Two passes – second pass converges after positions are known
-            for _ in range(2):
-                self._apply_layout_to_grid(
-                    fig, axes_grid, nrows, ncols, spanning_axes,
-                    width_ratios, height_ratios, is_subfigure, rect, **kw)
+            do_compress = (self._params.get('compress', False)
+                           and len(gridspec_to_axes) == 1)
+
+            if not do_compress:
+                # Two passes – second pass converges after positions are known.
+                for _ in range(2):
+                    self._apply_layout_to_grid(
+                        fig, axes_grid, nrows, ncols, spanning_axes,
+                        width_ratios, height_ratios, is_subfigure, rect, **kw)
+            else:
+                # Compressed layout.  Matplotlib's ``do_constrained_layout``
+                # runs the full solver twice: ``apply_aspect`` shrinks
+                # fixed-aspect axes on the first iteration, so the second
+                # iteration measures decorations relative to the shrunk boxes
+                # (reserving tick-label space between tightly-packed axes) and
+                # re-converges the slack so the orthogonal direction is not
+                # over-compressed.  We mirror that structure: measure the
+                # decoration margins once per outer iteration -- from the
+                # positions left by the previous iteration -- and reuse them
+                # for both the normal and the compressed placement.
+                #
+                # Both iterations always run, even when nothing compresses:
+                # auto tick locators add/remove ticks as the axes change size,
+                # so the second pass brings the decorations close to their
+                # final size (matching the plain two-pass path above).
+                renderer = fig._get_renderer()
+                fw = fig_width_inches
+                fh = fig_height_inches
+                if fw is None or fh is None:
+                    fw, fh = _fig_size_inches(fig)
+                for _outer in range(2):
+                    cached = self._measure_grid_margins(
+                        fig, renderer, axes_grid, nrows, ncols, spanning_axes)
+                    self._apply_layout_to_grid(
+                        fig, axes_grid, nrows, ncols, spanning_axes,
+                        width_ratios, height_ratios, is_subfigure, rect,
+                        cached_margins=cached, **kw)
+                    extra = self._compute_compression(
+                        fig, axes_grid, nrows, ncols, spanning_axes, fw, fh)
+                    if extra is not None:
+                        self._apply_layout_to_grid(
+                            fig, axes_grid, nrows, ncols, spanning_axes,
+                            width_ratios, height_ratios, is_subfigure, rect,
+                            compress_extra=extra, cached_margins=cached, **kw)
 
     def _apply_layout_to_grid(self, fig, axes_grid, nrows, ncols,
                                spanning_axes=None, width_ratios=None,
                                height_ratios=None, is_subfigure=False,
                                subfig_rect=None, fig_width_inches=None,
-                               fig_height_inches=None):
-        """Core algebraic positioning for one gridspec."""
+                               fig_height_inches=None, compress_extra=None,
+                               cached_margins=None):
+        """Core algebraic positioning for one gridspec.
+
+        Parameters
+        ----------
+        compress_extra : tuple of 4 floats or None
+            Extra outer margins ``(left, right, top, bottom)`` in
+            figure-relative coordinates added on top of the normal outer
+            margins.  Used by the compression pass.
+        cached_margins : tuple of 4 ndarrays or None
+            Pre-computed aggregated decoration margins
+            ``(left_margins, right_margins, bottom_margins, top_margins)``
+            (per-column for L/R, per-row for B/T) to use instead of
+            re-measuring.  The compression pass passes the margins measured
+            during the normal pass so that decoration space is not re-derived
+            from the shrunk (post-``apply_aspect``) axes.  This mirrors
+            matplotlib's ``compress_fixed_aspect``, which only edits the outer
+            figure margins and leaves the per-axis inner margins untouched.
+
+        Returns
+        -------
+        tuple of 4 ndarrays
+            The aggregated decoration margins
+            ``(left_margins, right_margins, bottom_margins, top_margins)``
+            actually used for placement, so callers can cache and reuse them.
+        """
         if spanning_axes is None:
             spanning_axes = []
 
@@ -267,6 +339,12 @@ class DirectLayoutEngine(LayoutEngine):
         rm = self._params['right'] / fig_width_inches
         tm = self._params['top']   / fig_height_inches
         bm = self._params['bottom']/ fig_height_inches
+        if compress_extra is not None:
+            extra_lm, extra_rm, extra_tm, extra_bm = compress_extra
+            lm += extra_lm
+            rm += extra_rm
+            tm += extra_tm
+            bm += extra_bm
         rect[0] += lm
         rect[1] += bm
         rect[2] -= lm + rm
@@ -274,6 +352,97 @@ class DirectLayoutEngine(LayoutEngine):
 
         rect = self._adjust_rect_for_suptitles(fig, renderer, rect)
 
+        if cached_margins is not None:
+            # Compression pass: reuse the decoration margins measured during
+            # the normal pass rather than re-deriving them from the shrunk
+            # (post-apply_aspect) axes.  Only the outer margins change here.
+            left_margins, right_margins, bottom_margins, top_margins = \
+                cached_margins
+        else:
+            left_margins, right_margins, bottom_margins, top_margins = \
+                self._measure_grid_margins(fig, renderer, axes_grid,
+                                           nrows, ncols, spanning_axes)
+
+        fig_left, fig_bottom, fig_width, fig_height = rect
+        fig_right = fig_left + fig_width
+        fig_top   = fig_bottom + fig_height
+
+        margins_used = (left_margins, right_margins, bottom_margins, top_margins)
+
+        available_width  = fig_width  - left_margins.sum() - right_margins.sum()  - w_pad * (ncols - 1)
+        available_height = fig_height - bottom_margins.sum() - top_margins.sum() - h_pad * (nrows - 1)
+
+        if available_width <= 0 or available_height <= 0:
+            return margins_used
+
+        width_ratios  = np.array(width_ratios)  if width_ratios  is not None else np.ones(ncols)
+        height_ratios = np.array(height_ratios) if height_ratios is not None else np.ones(nrows)
+        col_widths  = (width_ratios  / width_ratios.sum())  * available_width
+        row_heights = (height_ratios / height_ratios.sum()) * available_height
+
+        # --- Compute and apply positions ---
+        positions = np.zeros((nrows, ncols, 4))
+
+        for j in range(ncols):
+            col_left = (fig_left + left_margins[0] if j == 0
+                        else positions[0, j-1, 2] + right_margins[j-1] + w_pad + left_margins[j])
+            col_right = col_left + col_widths[j]
+
+            for i in range(nrows):
+                row_top = (fig_top - top_margins[0] if i == 0
+                           else positions[i-1, j, 1] - bottom_margins[i-1] - h_pad - top_margins[i])
+                row_bottom = row_top - row_heights[i]
+                positions[i, j] = [col_left, row_bottom, col_right, row_top]
+                ax = axes_grid[i, j]
+                if ax is not None and ax.get_visible():
+                    ax.set_position([col_left, row_bottom,
+                                     col_right - col_left, row_top - row_bottom])
+
+        for ax in spanning_axes:
+            if not ax.get_visible():
+                continue
+            ss = ax.get_subplotspec()
+            rs, re = ss.rowspan.start, ss.rowspan.stop
+            cs, ce = ss.colspan.start, ss.colspan.stop
+            ax.set_position([
+                positions[rs, cs, 0],
+                positions[re - 1, cs, 1],
+                positions[rs, ce - 1, 2] - positions[rs, cs, 0],
+                positions[rs, cs, 3]     - positions[re - 1, cs, 1],
+            ])
+
+        self._position_colorbars(fig, axes_grid, positions, nrows, ncols, spanning_axes)
+
+        return margins_used
+
+    def _measure_grid_margins(self, fig, renderer, axes_grid, nrows, ncols,
+                              spanning_axes):
+        """Measure decoration (and colorbar) margins for the whole grid.
+
+        Returns aggregated per-column ``(left, right)`` and per-row
+        ``(bottom, top)`` margin arrays in figure-relative coordinates.
+        """
+        # No axes is repositioned inside this method, so tight bboxes are
+        # stable for its whole duration: turn on the memo (a parent axes is
+        # otherwise measured twice -- as a decoration and as a colorbar anchor)
+        # and tear it down in ``finally`` so a stale, display-coordinate bbox
+        # can never survive into a later phase after ``set_position`` runs.
+        self._bbox_cache = {}
+        # id(axes) -> (row, col), built once so the colorbar helpers can look
+        # up an axes' grid cell instead of re-scanning the whole grid for every
+        # axes (previously O(n_axes * nrows * ncols)).
+        self._grid_pos = {id(axes_grid[i, j]): (i, j)
+                          for i in range(nrows) for j in range(ncols)
+                          if axes_grid[i, j] is not None}
+        try:
+            return self._measure_grid_margins_inner(
+                fig, renderer, axes_grid, nrows, ncols, spanning_axes)
+        finally:
+            self._bbox_cache = None
+            self._grid_pos = None
+
+    def _measure_grid_margins_inner(self, fig, renderer, axes_grid, nrows,
+                                    ncols, spanning_axes):
         # --- Margin array [row, col, side]: L=0 R=1 B=2 T=3 ---
         margins = np.zeros((nrows, ncols, 4))
 
@@ -336,63 +505,118 @@ class DirectLayoutEngine(LayoutEngine):
         top_margins    = np.array([margins[i, :, 3].max()
                                     if np.any(margins[i, :, :]) else 0
                                     for i in range(nrows)])
+        return left_margins, right_margins, bottom_margins, top_margins
 
-        fig_left, fig_bottom, fig_width, fig_height = rect
-        fig_right = fig_left + fig_width
-        fig_top   = fig_bottom + fig_height
+    # ------------------------------------------------------------------
+    # Compression helpers
+    # ------------------------------------------------------------------
 
-        available_width  = fig_width  - left_margins.sum() - right_margins.sum()  - w_pad * (ncols - 1)
-        available_height = fig_height - bottom_margins.sum() - top_margins.sum() - h_pad * (nrows - 1)
+    def _compute_compression(self, fig, axes_grid, nrows, ncols,
+                              spanning_axes, fig_width_inches, fig_height_inches):
+        """Compute extra outer margins that absorb fixed-aspect whitespace.
 
-        if available_width <= 0 or available_height <= 0:
-            return
+        After the normal layout pass, fixed-aspect axes (e.g. imshow) are
+        shrunk by :meth:`apply_aspect` at draw time, leaving whitespace inside
+        their allocated grid cells.  This method measures that slack and
+        returns the extra margin (in figure-relative coords) that should be
+        added to each pair of outer edges to centre the grid.
 
-        width_ratios  = np.array(width_ratios)  if width_ratios  is not None else np.ones(ncols)
-        height_ratios = np.array(height_ratios) if height_ratios is not None else np.ones(nrows)
-        col_widths  = (width_ratios  / width_ratios.sum())  * available_width
-        row_heights = (height_ratios / height_ratios.sum()) * available_height
+        Parameters
+        ----------
+        fig : Figure or SubFigure
+        axes_grid : ndarray, shape (nrows, ncols)
+        nrows, ncols : int
+        spanning_axes : list of Axes
+        fig_width_inches, fig_height_inches : float
 
-        # --- Compute and apply positions ---
-        positions = np.zeros((nrows, ncols, 4))
+        Returns
+        -------
+        tuple ``(extra_lm, extra_rm, extra_tm, extra_bm)`` in figure-relative
+        coordinates, or *None* if no axes have a fixed aspect ratio.
+        """
+        extraw = np.zeros(ncols)   # per-column slack (fig-relative)
+        extrah = np.zeros(nrows)   # per-row slack (fig-relative)
+        has_fixed_aspect = False
 
-        for j in range(ncols):
-            col_left = (fig_left + left_margins[0] if j == 0
-                        else positions[0, j-1, 2] + right_margins[j-1] + w_pad + left_margins[j])
-            col_right = col_left + col_widths[j]
-
-            for i in range(nrows):
-                row_top = (fig_top - top_margins[0] if i == 0
-                           else positions[i-1, j, 1] - bottom_margins[i-1] - h_pad - top_margins[i])
-                row_bottom = row_top - row_heights[i]
-                positions[i, j] = [col_left, row_bottom, col_right, row_top]
+        # Regular-grid axes
+        for i in range(nrows):
+            for j in range(ncols):
                 ax = axes_grid[i, j]
-                if ax is not None and ax.get_visible():
-                    ax.set_position([col_left, row_bottom,
-                                     col_right - col_left, row_top - row_bottom])
+                if ax is None or not ax.get_visible():
+                    continue
+                orig = ax.get_position(original=True)
+                ax.apply_aspect()
+                actual = ax.get_position(original=False)
+                dw = orig.width  - actual.width
+                dh = orig.height - actual.height
+                if dw > 1e-10:
+                    has_fixed_aspect = True
+                    extraw[j] = max(extraw[j], dw)
+                if dh > 1e-10:
+                    has_fixed_aspect = True
+                    extrah[i] = max(extrah[i], dh)
 
-        for ax in spanning_axes:
+        # Spanning axes
+        for ax in (spanning_axes or []):
             if not ax.get_visible():
                 continue
+            orig = ax.get_position(original=True)
+            ax.apply_aspect()
+            actual = ax.get_position(original=False)
+            dw = orig.width  - actual.width
+            dh = orig.height - actual.height
             ss = ax.get_subplotspec()
-            rs, re = ss.rowspan.start, ss.rowspan.stop
-            cs, ce = ss.colspan.start, ss.colspan.stop
-            ax.set_position([
-                positions[rs, cs, 0],
-                positions[re - 1, cs, 1],
-                positions[rs, ce - 1, 2] - positions[rs, cs, 0],
-                positions[rs, cs, 3]     - positions[re - 1, cs, 1],
-            ])
+            if dw > 1e-10:
+                has_fixed_aspect = True
+                extraw[ss.colspan] = np.maximum(extraw[ss.colspan], dw)
+            if dh > 1e-10:
+                has_fixed_aspect = True
+                extrah[ss.rowspan] = np.maximum(extrah[ss.rowspan], dh)
 
-        self._position_colorbars(fig, axes_grid, positions, nrows, ncols, spanning_axes)
+        if not has_fixed_aspect:
+            return None
+
+        # Half the total slack goes to each outer edge pair
+        extra_w = extraw.sum() / 2   # figure-relative units
+        extra_h = extrah.sum() / 2
+        return extra_w, extra_w, extra_h, extra_h   # left, right, top, bottom
 
     # ------------------------------------------------------------------
     # Decoration measurement helpers
     # ------------------------------------------------------------------
 
+    def _tightbbox(self, artist, renderer):
+        """``_get_tightbbox_for_layout_only`` memoised within the current phase.
+
+        Computing an artist's tight bbox (spines + ticks + labels + title) is
+        one of the most expensive operations in the layout, and the engine asks
+        for the *same* artist's tight bbox from several places in a single
+        phase -- e.g. a parent axes is measured once as a decoration source and
+        again as the anchor a colorbar hangs off.  Memoising per phase removes
+        that duplication (roughly halving the tight-bbox calls in
+        colorbar-heavy figures).
+
+        The cache is keyed by ``id(artist)`` and is only consulted when
+        ``self._bbox_cache`` is a live dict.  Callers own the cache lifetime:
+        they set it to ``{}`` at the start of a phase during which no axes
+        moves, and back to ``None`` at the end.  This is critical -- the tight
+        bbox is in display coordinates, so it becomes stale the moment an axes
+        is repositioned via ``set_position``.
+        """
+        cache = self._bbox_cache
+        if cache is None:
+            return martist._get_tightbbox_for_layout_only(artist, renderer)
+        key = id(artist)
+        bb = cache.get(key, False)
+        if bb is False:  # not cached yet (a genuine ``None`` result is cached)
+            bb = martist._get_tightbbox_for_layout_only(artist, renderer)
+            cache[key] = bb
+        return bb
+
     def _measure_axes_decorations(self, ax, renderer, fig):
         """Return margins (left/right/bottom/top) needed by *ax*'s decorations."""
         pos = ax.get_position(original=True)
-        tightbbox = martist._get_tightbbox_for_layout_only(ax, renderer)
+        tightbbox = self._tightbbox(ax, renderer)
         if tightbbox is None:
             return {'left': 0, 'right': 0, 'bottom': 0, 'top': 0}
         bbox = fig.transSubfigure.inverted().transform_bbox(tightbbox)
@@ -419,7 +643,7 @@ class DirectLayoutEngine(LayoutEngine):
         fig_w, fig_h = _fig_size_inches(fig)
 
         # Get colorbar's tight bbox (includes tick labels)
-        cax_tight = martist._get_tightbbox_for_layout_only(cax, renderer)
+        cax_tight = self._tightbbox(cax, renderer)
         if cax_tight is None:
             # Fallback: use conservative estimates
             if location in ('right', 'left'):
@@ -428,7 +652,7 @@ class DirectLayoutEngine(LayoutEngine):
                 return 0.7 / fig_h
 
         cax_bbox = fig.transSubfigure.inverted().transform_bbox(cax_tight)
-        parent_tight = martist._get_tightbbox_for_layout_only(parent_ax, renderer)
+        parent_tight = self._tightbbox(parent_ax, renderer)
         if parent_tight is None:
             parent_tight_bbox = parent_pos
         else:
@@ -460,16 +684,11 @@ class DirectLayoutEngine(LayoutEngine):
 
     def _measure_colorbar_space(self, ax, renderer, fig, axes_grid, nrows, ncols):
         """Margin reserved for colorbars attached to a regular-grid *ax*."""
-        ax_row = ax_col = None
-        for i in range(nrows):
-            for j in range(ncols):
-                if axes_grid[i, j] is ax:
-                    ax_row, ax_col = i, j
-                    break
-            if ax_row is not None:
-                break
-        if ax_row is None:
+        # Grid cell of *ax* from the precomputed map (see _measure_grid_margins).
+        rc = self._grid_pos.get(id(ax)) if self._grid_pos is not None else None
+        if rc is None:
             return None
+        ax_row, ax_col = rc
 
         colorbars = [(cax, cax._colorbar_info.get('parents', []))
                      for cax in fig.axes
@@ -487,10 +706,9 @@ class DirectLayoutEngine(LayoutEngine):
             if len(parents) > 1:
                 prows, pcols = [], []
                 for p in parents:
-                    for i in range(nrows):
-                        for j in range(ncols):
-                            if axes_grid[i, j] is p:
-                                prows.append(i); pcols.append(j)
+                    prc = self._grid_pos.get(id(p)) if self._grid_pos is not None else None
+                    if prc is not None:
+                        prows.append(prc[0]); pcols.append(prc[1])
                 if location == 'right'  and ax_col != max(pcols): continue
                 if location == 'left'   and ax_col != min(pcols): continue
                 if location == 'top'    and ax_row != min(prows): continue
@@ -500,7 +718,6 @@ class DirectLayoutEngine(LayoutEngine):
             space = self._measure_positioned_colorbar(cax, ax, location, renderer, fig)
             if space is None:
                 # Fallback for first pass: conservative estimate
-                fig_w, fig_h = _fig_size_inches(fig)
                 space = 0.7 / fig_w if location in ('right', 'left') else 0.7 / fig_h
             cb_margins[location] += space
 
@@ -538,10 +755,29 @@ class DirectLayoutEngine(LayoutEngine):
 
         renderer = fig._get_renderer()
         fig_w, fig_h = _fig_size_inches(fig)
-        bar_in = 0.2; pad_in = 0.1
+        pad_in = 0.1
         positioned = set()
-        colorbar_positions = {}  # Track positioned colorbars by location
 
+        # id(axes) -> (row, col) so we don't rescan the grid per parent below.
+        pos_of = {id(axes_grid[i, j]): (i, j)
+                  for i in range(nrows) for j in range(ncols)
+                  if axes_grid[i, j] is not None}
+        # Fresh tight-bbox memo for this phase.  Only colorbar axes are moved
+        # here, never their parents, so a parent's tight bbox is stable and safe
+        # to memoise across the loop (a parent may anchor several colorbars).
+        # These are the *new* post-positioning bboxes, so this cache must be
+        # independent of the one used during measurement.
+        self._bbox_cache = {}
+        try:
+            self._position_colorbars_inner(
+                fig, axes_grid, positions, nrows, ncols, spanning_axes,
+                renderer, fig_w, fig_h, pad_in, positioned, pos_of)
+        finally:
+            self._bbox_cache = None
+
+    def _position_colorbars_inner(self, fig, axes_grid, positions, nrows, ncols,
+                                  spanning_axes, renderer, fig_w, fig_h, pad_in,
+                                  positioned, pos_of):
         for cax in fig.axes:
             if not hasattr(cax, '_colorbar_info') or id(cax) in positioned:
                 continue
@@ -552,19 +788,13 @@ class DirectLayoutEngine(LayoutEngine):
             if not parents:
                 continue
 
-            # Collect parent positions
+            # Collect parent positions (grid cell from the precomputed map).
             pp = []
             for pax in parents:
-                found = False
-                for i in range(nrows):
-                    for j in range(ncols):
-                        if axes_grid[i, j] is pax:
-                            pp.append(positions[i, j])
-                            found = True
-                            break
-                    if found:
-                        break
-                if not found and pax in spanning_axes:
+                rc = pos_of.get(id(pax))
+                if rc is not None:
+                    pp.append(positions[rc[0], rc[1]])
+                elif pax in spanning_axes:
                     pos = pax.get_position()
                     pp.append([pos.x0, pos.y0, pos.x1, pos.y1])
             if not pp:
@@ -586,7 +816,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start after the tight bbox right edge of all parents
                 tight_right = sx1
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_right = max(tight_right, t.x1)
@@ -607,7 +837,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start before the tight bbox left edge of all parents
                 tight_left = sx0
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_left = min(tight_left, t.x0)
@@ -627,7 +857,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start above the tight bbox top edge of all parents
                 tight_top = sy1
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_top = max(tight_top, t.y1)
@@ -647,7 +877,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start below the tight bbox bottom edge of all parents
                 tight_bottom = sy0
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_bottom = min(tight_bottom, t.y0)
