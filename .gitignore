@@ -85,3 +85,4 @@ benchmark_timing_memory*.txt
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+pixi.lock
