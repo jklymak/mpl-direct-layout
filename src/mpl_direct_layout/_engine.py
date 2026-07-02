@@ -7,9 +7,7 @@ of constraint solving to position axes on a grid.
 
 import numpy as np
 from matplotlib.layout_engine import LayoutEngine
-from matplotlib.transforms import Bbox
 from matplotlib import artist as martist
-import matplotlib as mpl
 
 
 def _fig_size_inches(fig):
@@ -68,6 +66,12 @@ class DirectLayoutEngine(LayoutEngine):
                  left=None, right=None, top=None, bottom=None,
                  suptitle_pad=None, compress=False, **kwargs):
         super().__init__(**kwargs)
+        # Per-pass memo of tight bboxes (see ``_tightbbox``) and of the grid
+        # position of each axes (see ``_measure_grid_margins``).  Both are
+        # scratch state that is rebuilt and torn down within a single phase;
+        # they must never persist across a ``set_position`` call.
+        self._bbox_cache = None
+        self._grid_pos = None
         default_pad = 0.1  # inches between axes
         default_margin = 0.1  # inches at figure edges
         self.set(h_pad=h_pad if h_pad is not None else default_pad,
@@ -123,8 +127,6 @@ class DirectLayoutEngine(LayoutEngine):
         """
         Perform layout on *fig*.  Called automatically during the draw cycle.
         """
-        from matplotlib.figure import SubFigure
-
         subfigs = fig.subfigs if hasattr(fig, 'subfigs') and fig.subfigs else []
 
         if subfigs:
@@ -420,6 +422,27 @@ class DirectLayoutEngine(LayoutEngine):
         Returns aggregated per-column ``(left, right)`` and per-row
         ``(bottom, top)`` margin arrays in figure-relative coordinates.
         """
+        # No axes is repositioned inside this method, so tight bboxes are
+        # stable for its whole duration: turn on the memo (a parent axes is
+        # otherwise measured twice -- as a decoration and as a colorbar anchor)
+        # and tear it down in ``finally`` so a stale, display-coordinate bbox
+        # can never survive into a later phase after ``set_position`` runs.
+        self._bbox_cache = {}
+        # id(axes) -> (row, col), built once so the colorbar helpers can look
+        # up an axes' grid cell instead of re-scanning the whole grid for every
+        # axes (previously O(n_axes * nrows * ncols)).
+        self._grid_pos = {id(axes_grid[i, j]): (i, j)
+                          for i in range(nrows) for j in range(ncols)
+                          if axes_grid[i, j] is not None}
+        try:
+            return self._measure_grid_margins_inner(
+                fig, renderer, axes_grid, nrows, ncols, spanning_axes)
+        finally:
+            self._bbox_cache = None
+            self._grid_pos = None
+
+    def _measure_grid_margins_inner(self, fig, renderer, axes_grid, nrows,
+                                    ncols, spanning_axes):
         # --- Margin array [row, col, side]: L=0 R=1 B=2 T=3 ---
         margins = np.zeros((nrows, ncols, 4))
 
@@ -562,10 +585,38 @@ class DirectLayoutEngine(LayoutEngine):
     # Decoration measurement helpers
     # ------------------------------------------------------------------
 
+    def _tightbbox(self, artist, renderer):
+        """``_get_tightbbox_for_layout_only`` memoised within the current phase.
+
+        Computing an artist's tight bbox (spines + ticks + labels + title) is
+        one of the most expensive operations in the layout, and the engine asks
+        for the *same* artist's tight bbox from several places in a single
+        phase -- e.g. a parent axes is measured once as a decoration source and
+        again as the anchor a colorbar hangs off.  Memoising per phase removes
+        that duplication (roughly halving the tight-bbox calls in
+        colorbar-heavy figures).
+
+        The cache is keyed by ``id(artist)`` and is only consulted when
+        ``self._bbox_cache`` is a live dict.  Callers own the cache lifetime:
+        they set it to ``{}`` at the start of a phase during which no axes
+        moves, and back to ``None`` at the end.  This is critical -- the tight
+        bbox is in display coordinates, so it becomes stale the moment an axes
+        is repositioned via ``set_position``.
+        """
+        cache = self._bbox_cache
+        if cache is None:
+            return martist._get_tightbbox_for_layout_only(artist, renderer)
+        key = id(artist)
+        bb = cache.get(key, False)
+        if bb is False:  # not cached yet (a genuine ``None`` result is cached)
+            bb = martist._get_tightbbox_for_layout_only(artist, renderer)
+            cache[key] = bb
+        return bb
+
     def _measure_axes_decorations(self, ax, renderer, fig):
         """Return margins (left/right/bottom/top) needed by *ax*'s decorations."""
         pos = ax.get_position(original=True)
-        tightbbox = martist._get_tightbbox_for_layout_only(ax, renderer)
+        tightbbox = self._tightbbox(ax, renderer)
         if tightbbox is None:
             return {'left': 0, 'right': 0, 'bottom': 0, 'top': 0}
         bbox = fig.transSubfigure.inverted().transform_bbox(tightbbox)
@@ -592,7 +643,7 @@ class DirectLayoutEngine(LayoutEngine):
         fig_w, fig_h = _fig_size_inches(fig)
 
         # Get colorbar's tight bbox (includes tick labels)
-        cax_tight = martist._get_tightbbox_for_layout_only(cax, renderer)
+        cax_tight = self._tightbbox(cax, renderer)
         if cax_tight is None:
             # Fallback: use conservative estimates
             if location in ('right', 'left'):
@@ -601,7 +652,7 @@ class DirectLayoutEngine(LayoutEngine):
                 return 0.7 / fig_h
 
         cax_bbox = fig.transSubfigure.inverted().transform_bbox(cax_tight)
-        parent_tight = martist._get_tightbbox_for_layout_only(parent_ax, renderer)
+        parent_tight = self._tightbbox(parent_ax, renderer)
         if parent_tight is None:
             parent_tight_bbox = parent_pos
         else:
@@ -633,16 +684,11 @@ class DirectLayoutEngine(LayoutEngine):
 
     def _measure_colorbar_space(self, ax, renderer, fig, axes_grid, nrows, ncols):
         """Margin reserved for colorbars attached to a regular-grid *ax*."""
-        ax_row = ax_col = None
-        for i in range(nrows):
-            for j in range(ncols):
-                if axes_grid[i, j] is ax:
-                    ax_row, ax_col = i, j
-                    break
-            if ax_row is not None:
-                break
-        if ax_row is None:
+        # Grid cell of *ax* from the precomputed map (see _measure_grid_margins).
+        rc = self._grid_pos.get(id(ax)) if self._grid_pos is not None else None
+        if rc is None:
             return None
+        ax_row, ax_col = rc
 
         colorbars = [(cax, cax._colorbar_info.get('parents', []))
                      for cax in fig.axes
@@ -660,10 +706,9 @@ class DirectLayoutEngine(LayoutEngine):
             if len(parents) > 1:
                 prows, pcols = [], []
                 for p in parents:
-                    for i in range(nrows):
-                        for j in range(ncols):
-                            if axes_grid[i, j] is p:
-                                prows.append(i); pcols.append(j)
+                    prc = self._grid_pos.get(id(p)) if self._grid_pos is not None else None
+                    if prc is not None:
+                        prows.append(prc[0]); pcols.append(prc[1])
                 if location == 'right'  and ax_col != max(pcols): continue
                 if location == 'left'   and ax_col != min(pcols): continue
                 if location == 'top'    and ax_row != min(prows): continue
@@ -673,7 +718,6 @@ class DirectLayoutEngine(LayoutEngine):
             space = self._measure_positioned_colorbar(cax, ax, location, renderer, fig)
             if space is None:
                 # Fallback for first pass: conservative estimate
-                fig_w, fig_h = _fig_size_inches(fig)
                 space = 0.7 / fig_w if location in ('right', 'left') else 0.7 / fig_h
             cb_margins[location] += space
 
@@ -711,10 +755,29 @@ class DirectLayoutEngine(LayoutEngine):
 
         renderer = fig._get_renderer()
         fig_w, fig_h = _fig_size_inches(fig)
-        bar_in = 0.2; pad_in = 0.1
+        pad_in = 0.1
         positioned = set()
-        colorbar_positions = {}  # Track positioned colorbars by location
 
+        # id(axes) -> (row, col) so we don't rescan the grid per parent below.
+        pos_of = {id(axes_grid[i, j]): (i, j)
+                  for i in range(nrows) for j in range(ncols)
+                  if axes_grid[i, j] is not None}
+        # Fresh tight-bbox memo for this phase.  Only colorbar axes are moved
+        # here, never their parents, so a parent's tight bbox is stable and safe
+        # to memoise across the loop (a parent may anchor several colorbars).
+        # These are the *new* post-positioning bboxes, so this cache must be
+        # independent of the one used during measurement.
+        self._bbox_cache = {}
+        try:
+            self._position_colorbars_inner(
+                fig, axes_grid, positions, nrows, ncols, spanning_axes,
+                renderer, fig_w, fig_h, pad_in, positioned, pos_of)
+        finally:
+            self._bbox_cache = None
+
+    def _position_colorbars_inner(self, fig, axes_grid, positions, nrows, ncols,
+                                  spanning_axes, renderer, fig_w, fig_h, pad_in,
+                                  positioned, pos_of):
         for cax in fig.axes:
             if not hasattr(cax, '_colorbar_info') or id(cax) in positioned:
                 continue
@@ -725,19 +788,13 @@ class DirectLayoutEngine(LayoutEngine):
             if not parents:
                 continue
 
-            # Collect parent positions
+            # Collect parent positions (grid cell from the precomputed map).
             pp = []
             for pax in parents:
-                found = False
-                for i in range(nrows):
-                    for j in range(ncols):
-                        if axes_grid[i, j] is pax:
-                            pp.append(positions[i, j])
-                            found = True
-                            break
-                    if found:
-                        break
-                if not found and pax in spanning_axes:
+                rc = pos_of.get(id(pax))
+                if rc is not None:
+                    pp.append(positions[rc[0], rc[1]])
+                elif pax in spanning_axes:
                     pos = pax.get_position()
                     pp.append([pos.x0, pos.y0, pos.x1, pos.y1])
             if not pp:
@@ -759,7 +816,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start after the tight bbox right edge of all parents
                 tight_right = sx1
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_right = max(tight_right, t.x1)
@@ -780,7 +837,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start before the tight bbox left edge of all parents
                 tight_left = sx0
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_left = min(tight_left, t.x0)
@@ -800,7 +857,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start above the tight bbox top edge of all parents
                 tight_top = sy1
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_top = max(tight_top, t.y1)
@@ -820,7 +877,7 @@ class DirectLayoutEngine(LayoutEngine):
                 # Start below the tight bbox bottom edge of all parents
                 tight_bottom = sy0
                 for pax in parents:
-                    tb = martist._get_tightbbox_for_layout_only(pax, renderer)
+                    tb = self._tightbbox(pax, renderer)
                     if tb is not None:
                         t = fig.transSubfigure.inverted().transform_bbox(tb)
                         tight_bottom = min(tight_bottom, t.y0)
